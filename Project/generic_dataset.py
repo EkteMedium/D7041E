@@ -5,6 +5,7 @@ import random
 from ucimlrepo import fetch_ucirepo
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import train_test_split
 
 class GenericDataset():
     '''
@@ -18,6 +19,7 @@ class GenericDataset():
       ValueError: If the dataset is not meant for classification.
 
     '''
+    @np.errstate(all='ignore')
     def __init__(self, uci_id, splits = (1,0,0), seed = None, show_info = False):
 
         # Sets seed
@@ -43,29 +45,71 @@ class GenericDataset():
 
         # Fetch dataset
         self.dataset = fetch_ucirepo(id=uci_id)
+        df_features = self.dataset.data.features
+        df_label = self.dataset.data.targets
 
-        # Sets flag indicating if the database has targets.
-        self.has_targets = self.dataset.data.targets is not None
+        # Create a copy
+        df_features = df_features.loc[:,~df_features.columns.duplicated()].copy()
+        df_label = df_label.loc[:,~df_label.columns.duplicated()].copy()
 
-        df = self.dataset.data.features
-        print(df)
-        print(df.dtypes)
-        df = self._pre_process(self.dataset.data.features)
-        print(df)
-        print(df.dtypes)
+        # Get the number of non objective columns (eg. int or float)
+        num_non_O = len([col for col in df_features if df_features[col].dtype!='O'])
 
-        # Split into train/val/test splits.
-        self.features_tuple, self.targets_tuple = self._split_pandas(self.dataset.data.features,
-                                                                     self.dataset.data.targets,
-                                                                     self.train_split,
-                                                                     self.val_split,
-                                                                     self.test_split)
-
-        # Check if Classification is one of the tasks.
-        if 'Classification' not in self.dataset.metadata['tasks']:
-            raise ValueError((f'This dataset is not suitable for Classification. '
-                              f'Only suitable for {str(self.dataset.metadata['tasks'])}.'))
+        # Get all object column names and onehot encode them
+        object_columns = [col for col in df_features if df_features[col].dtype=='O']
+        df_features = pd.get_dummies(df_features, columns=object_columns, dtype=float).astype(float)
         
+        # Go through the labels and turn categorical data to numbers
+        object_columns = [col for col in df_label if df_label[col].dtype=='O']
+        for object_column in object_columns:
+            b = pd.factorize(df_label[object_column].to_numpy())[0]
+            df_label = df_label.drop(object_column,axis=1)
+            df_label = df_label.astype('float')
+            df_label[object_column]=b
+        
+        # Shift so all labels are positive
+        non_object_columns = [col for col in df_label if df_label[col].dtype!='O']
+        for non_object_coloumn in non_object_columns:
+            df_label[non_object_coloumn] = df_label[non_object_coloumn]-df_label[non_object_coloumn].min()
+
+        # Combine features and labels
+        df = df_features
+        df['label'] = np.asarray(df_label)
+
+        # Remove all rows with a nan
+        df = df[~pd.isnull(df).any(axis=1)]
+        label_arr = df['label'].to_numpy()
+        df = df.drop('label',axis=1)
+        df['label'] = label_arr.astype('int')
+        np.errstate(all='ignore')
+
+        # Split into train/val/test sets
+        train_val, test = train_test_split(df, test_size=self.test_split)
+        train, val = train_test_split(train_val,  test_size=self.val_split/(self.val_split+self.train_split))
+
+        # Normalize all non label and non onehot train samples with train mean/std
+        train_label = np.asarray(train['label'])
+        train = np.asarray(train.drop(['label'],axis=1)).copy()
+
+        mean = np.mean(train[:,:num_non_O],axis=0,keepdims=True)
+        std = np.std(train[:,:num_non_O],axis=0,keepdims=True)
+        train[:,:num_non_O] = np.where(std!=0,(train[:,:num_non_O]-mean)/std,(train[:,:num_non_O]-mean))
+        self.train = (train,train_label)
+
+        # Normalize all non label and non onehot val samples with train mean/std
+        val_label = np.asarray(val['label'])
+        val = np.asarray(val.drop(['label'],axis=1)).copy()
+        val[:,:num_non_O] = np.where(std!=0,(val[:,:num_non_O]-mean)/std,(val[:,:num_non_O]-mean))
+        self.val = (val,val_label)
+
+        # Normalize all non label and non onehot test samples with train mean/std
+        test_label = np.asarray(test['label'])
+        test = np.asarray(test.drop(['label'],axis=1)).copy()
+        test[:,:num_non_O] = np.where(std!=0,(test[:,:num_non_O]-mean)/std,(test[:,:num_non_O]-mean))
+        self.test = (test,test_label)
+
+        self.dataset.metadata["num_features"] = train.shape[1]
+        self.dataset.metadata["num_classes"] = (np.max(np.asarray(df['label']))+1).astype(int).item()
 
         # Print info.
         if show_info:
@@ -98,81 +142,29 @@ class GenericDataset():
         """
         return self.dataset.metadata
 
-    def get_train(self):
+    def get_train(self, onehot=False):
         """
         Returns a numpy of the train features
         """
-        features = self.features_tuple[0]
-        targets = self.targets_tuple[0]
-        return np.array(features), np.array(targets)
+        return self.train
 
-    def get_validation(self):
+    def get_val(self, onehot=False):
         """
         Returns a numpy of the train features
         """
-        features = self.features_tuple[1]
-        targets = self.targets_tuple[1]
-        return np.array(features), np.array(targets)
+        return self.val
 
-    def get_test(self):
+    def get_test(self, onehot=False):
         """
         Returns a numpy of the train features
         """
-        features = self.features_tuple[2]
-        targets = self.targets_tuple[2]
-        return np.array(features), np.array(targets)
+        return self.test
 
     def get_labels(self):
         """
         Returns a targets of the dataset features
         """
         return self.dataset.data.targets
-
-    def _split_pandas(self, features, targets, *splits):
-        if sum(splits)!=1:
-            raise ValueError("Splits should add to 1.")
-
-        num_rows = len(features.index)
-
-        indexes = list(range(num_rows))
-        split_indexes = []
-
-        for split in splits[:-1]:
-            inxs = []
-            for _ in range(int(split*num_rows)):
-                inxs.append(indexes.pop(int(random.random()*len(indexes))))
-            split_indexes.append(inxs)
-        split_indexes.append(indexes)
-
-        feature_splits = []
-        target_splits = []
-        for indexes in split_indexes:
-            feature_splits.append(features.iloc[indexes])
-            target_splits.append(targets.iloc[indexes])
-
-        return (tuple(feature_splits), tuple(target_splits))
-
-    def _pre_process(self,df):
-        df = self._normalize(df)
-        df = self._one_hot_encode(df)
-        return df
-
-    def _one_hot_encode(self,df:pd.DataFrame):
-        object_columns = [col for col in df if df[col].dtype=='O']
-        df2 = pd.get_dummies(df, columns=object_columns, dtype=float).astype(float)
-        return df2
-
-    def _normalize(self, df, means=None, stds=None):
-        non_O_columns = [col for col in df if df[col].dtype!='O']
-
-        #if non_O_columns != len(means) or non_O_columns != len(stds):
-        #    raise ValueError("Length of means and stds need to be the same as number of non object columns.")
-
-        # Whitening
-        for column in non_O_columns:
-            df[column] = (df[column]-df[column].mean())/df[column].std()
-        
-        return df
 
 if __name__ == "__main__":
     ds = GenericDataset(53, splits=(0.5, 0.3, 0.2), show_info=True, seed=1234)
