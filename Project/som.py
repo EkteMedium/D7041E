@@ -57,7 +57,7 @@ def SOM (trainingData, ndim=10, nepochs=10, eta0=0.1, etadecay=0.05, sgm0=20, sg
     x,y=np.meshgrid(range(ncols),range(nrows))
     
     
-    for t in tqdm(range (1,nepochs+1)):
+    for t in range(1,nepochs+1):
         if t==round((nepochs+1)/2) and showMode>=1:
             plot_SOM(dispRes=dispRes,som=som,ndim=ndim,text="50% of iterations")
 
@@ -113,7 +113,6 @@ def SOM (trainingData, ndim=10, nepochs=10, eta0=0.1, etadecay=0.05, sgm0=20, sg
     return som
     
 
-    #verification of correctness on the training set:
 def SOM_Test ( som_, X_train, L_train, X_test, L_test, nclasses, ndim=60,grid_=None,ConfusionMatrix=None):
     nfeatures=X_train.shape[1]
     ntrainingvectors=X_train.shape[0]
